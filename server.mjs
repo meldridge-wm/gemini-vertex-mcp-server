@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 /**
- * Gemini MCP Server — Dual Backend
- * Vertex AI for Gemini 3 models, AI Studio (API key) for robotics.
- * Region: global (preview models require global).
- * When models go GA, switch GEMINI_LOCATION to nearest region:
- *   us-east4 (N. Virginia), us-central1 (Iowa), us-west1 (Oregon)
+ * Gemini MCP Server — Multi-Region, Dual Backend
+ * - Gemini 2.5 Pro/Flash → Vertex AI, regional (low latency)
+ * - Gemini 3 Pro/Flash → Vertex AI, global (preview)
+ * - Gemini Robotics ER → AI Studio, API key (not on Vertex AI yet)
+ *
+ * When Gemini 3 goes GA and gets regional support, move it to REGIONAL_LOCATION.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -17,15 +18,23 @@ import {
 import { GoogleGenAI } from '@google/genai';
 
 const PROJECT = process.env.GEMINI_PROJECT || 'gcp-virtual-production-lab';
-const LOCATION = process.env.GEMINI_LOCATION || 'global';
+const GLOBAL_LOCATION = 'global';
+const REGIONAL_LOCATION = process.env.GEMINI_REGION || 'us-central1';
 const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-3-pro-preview';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
-// Vertex AI client for Gemini 3 models
-const vertexAI = new GoogleGenAI({
+// Vertex AI client — regional (Gemini 2.5 GA models, lower latency)
+const vertexRegional = new GoogleGenAI({
   vertexai: true,
   project: PROJECT,
-  location: LOCATION,
+  location: REGIONAL_LOCATION,
+});
+
+// Vertex AI client — global (Gemini 3 preview models, computer-use)
+const vertexGlobal = new GoogleGenAI({
+  vertexai: true,
+  project: PROJECT,
+  location: GLOBAL_LOCATION,
 });
 
 // AI Studio client for models not yet on Vertex AI (robotics, etc.)
@@ -33,11 +42,30 @@ const aiStudio = GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
   : null;
 
-// Models that must use AI Studio (not available on Vertex AI yet)
+// Routing table: model → { client, backend label }
 const AI_STUDIO_MODELS = new Set(['gemini-robotics-er-1.5-preview']);
+const GLOBAL_MODELS = new Set([
+  'gemini-3-pro-preview',
+  'gemini-3-flash-preview',
+]);
+// Everything else goes to regional
+
+// Models that don't support thinking config
+const NO_THINKING_MODELS = new Set(['gemini-robotics-er-1.5-preview']);
+
+function getClientAndBackend(model) {
+  if (AI_STUDIO_MODELS.has(model)) {
+    return { client: aiStudio, backend: 'AI Studio', needsKey: true };
+  }
+  if (GLOBAL_MODELS.has(model)) {
+    return { client: vertexGlobal, backend: `Vertex AI | ${GLOBAL_LOCATION}` };
+  }
+  // GA models → regional for lower latency
+  return { client: vertexRegional, backend: `Vertex AI | ${REGIONAL_LOCATION}` };
+}
 
 const server = new Server(
-  { name: 'gemini', version: '2.0.0' },
+  { name: 'gemini', version: '3.0.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -60,8 +88,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           model: {
             type: 'string',
             description:
-              'Model: gemini-3-pro-preview (default), gemini-3-flash-preview (faster), gemini-robotics-er-1.5-preview (robotics/embodied reasoning)',
-            enum: ['gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-robotics-er-1.5-preview'],
+              'Model: gemini-3-pro-preview (default), gemini-3-flash-preview (faster), ' +
+              'gemini-robotics-er-1.5-preview (robotics/embodied reasoning)',
+            enum: [
+              'gemini-3-pro-preview', 'gemini-3-flash-preview',
+              'gemini-2.5-pro', 'gemini-2.5-flash',
+              'gemini-robotics-er-1.5-preview'
+            ],
             default: 'gemini-3-pro-preview'
           },
           context: {
@@ -112,9 +145,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     const config = {};
 
-    // Thinking config (robotics model doesn't support thinking)
-    const isRobotics = selectedModel.includes('robotics');
-    if (thinkingLevel !== 'NONE' && !isRobotics) {
+    // Thinking config (some models don't support it)
+    if (thinkingLevel !== 'NONE' && !NO_THINKING_MODELS.has(selectedModel)) {
       config.thinkingConfig = { thinkingLevel };
     }
 
@@ -124,15 +156,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Route to the right backend
-    const useAIStudio = AI_STUDIO_MODELS.has(selectedModel);
-    if (useAIStudio && !aiStudio) {
+    const { client, backend, needsKey } = getClientAndBackend(selectedModel);
+    if (needsKey && !client) {
       return {
         content: [{ type: 'text', text: `${selectedModel} requires GEMINI_API_KEY (not available on Vertex AI yet)` }],
         isError: true
       };
     }
-    const client = useAIStudio ? aiStudio : vertexAI;
-    const backend = useAIStudio ? 'AI Studio' : `Vertex AI | ${LOCATION}`;
 
     const response = await client.models.generateContent({
       model: selectedModel,
