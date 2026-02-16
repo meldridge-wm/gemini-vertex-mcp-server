@@ -4,7 +4,9 @@
  * Gemini MCP Server — Vertex AI Edition
  * Exposes Gemini 3 (via Vertex AI) as a tool for Claude Code.
  * Uses Application Default Credentials (gcloud auth) — no API key needed.
- * Region: global (enterprise Gemini 3 access via WBD/Google partnership).
+ * Region: global (preview models require global).
+ * When models go GA, switch GEMINI_LOCATION to nearest region:
+ *   us-east4 (N. Virginia), us-central1 (Iowa), us-west1 (Oregon)
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -38,7 +40,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         'Ask Gemini (Google\'s AI) a question. Use this for creative brainstorming, ' +
         'second opinions on architecture, generating alternative implementations, ' +
         'or when you want a different perspective. Gemini 3 Pro is used by default. ' +
-        'You can also use gemini-3-flash-preview for faster/cheaper queries.',
+        'Also available: gemini-3-flash-preview (faster), gemini-robotics-er-1.5-preview (robotics/embodied reasoning).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -49,8 +51,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           model: {
             type: 'string',
             description:
-              'Model to use: gemini-3-pro-preview (default, best quality) or gemini-3-flash-preview (faster)',
-            enum: ['gemini-3-pro-preview', 'gemini-3-flash-preview'],
+              'Model: gemini-3-pro-preview (default), gemini-3-flash-preview (faster), gemini-robotics-er-1.5-preview (robotics/embodied reasoning)',
+            enum: ['gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-robotics-er-1.5-preview'],
             default: 'gemini-3-pro-preview'
           },
           context: {
@@ -101,8 +103,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     const config = {};
 
-    // Thinking config
-    if (thinkingLevel !== 'NONE') {
+    // Thinking config (robotics model doesn't support thinking)
+    const isRobotics = selectedModel.includes('robotics');
+    if (thinkingLevel !== 'NONE' && !isRobotics) {
       config.thinkingConfig = { thinkingLevel };
     }
 
