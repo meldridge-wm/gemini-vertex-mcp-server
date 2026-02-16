@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 
 """
-Gemini Computer Use — Vertex AI Edition
+Gemini Computer Use — Dual Mode (AI Studio / Vertex AI)
 Browser automation via Gemini 2.5 Computer Use preview model.
 Uses Playwright to control a Chromium browser; model sees screenshots
 and returns UI actions (click, type, scroll, navigate, etc.).
 
-Region: global only (preview model).
+Currently uses AI Studio (API key) because Vertex AI doesn't support
+the multi-turn function_response flow for computer-use yet.
+When fixed, use --vertex flag or GEMINI_USE_VERTEX=1.
 
 Usage:
+  export GEMINI_API_KEY=your-key
   python computer-use.py "Search Google for Gemini API pricing"
   python computer-use.py --url https://example.com "Find the contact page"
   python computer-use.py --headless "Go to weather.com and get NYC forecast"
@@ -30,17 +33,31 @@ from google.genai import types
 # --- Config ---
 PROJECT = os.environ.get("GEMINI_PROJECT", "gcp-virtual-production-lab")
 LOCATION = os.environ.get("GEMINI_LOCATION", "global")
+USE_VERTEX = os.environ.get("GEMINI_USE_VERTEX", "").lower() in ("1", "true", "yes")
 MODEL = "gemini-2.5-computer-use-preview-10-2025"
 
 SCREEN_WIDTH = 1440
 SCREEN_HEIGHT = 900
 MAX_TURNS = 25
 
-client = genai.Client(
-    vertexai=True,
-    project=PROJECT,
-    location=LOCATION,
-)
+
+def make_client(use_vertex=False):
+    if use_vertex:
+        return genai.Client(
+            vertexai=True,
+            project=PROJECT,
+            location=LOCATION,
+        )
+    else:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            print("ERROR: Set GEMINI_API_KEY env var, or use --vertex for Vertex AI.")
+            print("  export GEMINI_API_KEY=your-key")
+            sys.exit(1)
+        return genai.Client(
+            http_options={"api_version": "v1beta"},
+            api_key=api_key,
+        )
 
 
 def denormalize_x(x, width=SCREEN_WIDTH):
@@ -134,33 +151,52 @@ def execute_actions(candidate, page):
     return results
 
 
-def build_function_responses(page, results):
+def build_function_responses(page, results, candidate=None):
     """Build FunctionResponse parts with a fresh screenshot."""
     screenshot = page.screenshot(type="png")
-    url = page.url
-    responses = []
+    current_url = page.url
+
+    # Build a map of which function calls need safety acknowledgement
+    needs_ack = set()
+    if candidate:
+        for p in candidate.content.parts:
+            if p.function_call:
+                args = p.function_call.args or {}
+                sd = args.get("safety_decision", {})
+                if sd.get("decision") == "require_confirmation":
+                    needs_ack.add(p.function_call.name)
+
+    parts = []
     for name, result in results:
-        response_data = {"url": url}
-        response_data.update(result)
-        responses.append(
+        # Computer-use model REQUIRES 'url' in every function response
+        output = {"output": "ok", "url": current_url}
+        if result:
+            output.update(result)
+        # Acknowledge safety decisions
+        if name in needs_ack:
+            output["safety_acknowledgement"] = True
+        parts.append(
             types.Part.from_function_response(
                 name=name,
-                response=response_data,
+                response=output,
             )
         )
-    # Attach screenshot as the last part
-    screenshot_part = types.Part.from_bytes(data=screenshot, mime_type="image/png")
-    return responses + [screenshot_part]
+    # Append screenshot as the last part
+    parts.append(types.Part.from_bytes(data=screenshot, mime_type="image/png"))
+    return parts
 
 
-def run(task, start_url="https://www.google.com", headless=False):
+def run(task, start_url="https://www.google.com", headless=False, use_vertex=False):
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("ERROR: pip install playwright && playwright install chromium")
         sys.exit(1)
 
-    print(f"Gemini Computer Use — Vertex AI ({LOCATION})")
+    client = make_client(use_vertex)
+    backend = f"Vertex AI ({LOCATION})" if use_vertex else "AI Studio (API key)"
+
+    print(f"Gemini Computer Use — {backend}")
     print(f"  Model:    {MODEL}")
     print(f"  Task:     {task}")
     print(f"  Start:    {start_url}")
@@ -187,7 +223,7 @@ def run(task, start_url="https://www.google.com", headless=False):
                     )
                 )
             ],
-            thinking_config=types.ThinkingConfig(include_thoughts=True),
+            # Note: computer-use model does not support thinking config on Vertex AI
         )
 
         initial_screenshot = page.screenshot(type="png")
@@ -212,13 +248,6 @@ def run(task, start_url="https://www.google.com", headless=False):
             candidate = response.candidates[0]
             contents.append(candidate.content)
 
-            # Print any thinking or text output
-            for part in candidate.content.parts:
-                if hasattr(part, "thought") and part.thought:
-                    print(f"  [thinking] {part.text[:200]}...")
-                elif hasattr(part, "text") and part.text and not hasattr(part, "function_call"):
-                    pass  # Will print final answer below
-
             # Check if model returned actions or a final answer
             has_actions = any(p.function_call for p in candidate.content.parts)
             if not has_actions:
@@ -235,9 +264,18 @@ def run(task, start_url="https://www.google.com", headless=False):
                     # Safety: check if any action requires confirmation
                     pass
 
+            # Check for safety confirmations
+            for p in candidate.content.parts:
+                if p.function_call:
+                    args = p.function_call.args or {}
+                    sd = args.get("safety_decision", {})
+                    if sd.get("decision") == "require_confirmation":
+                        print(f"  !! Safety confirmation required: {sd.get('explanation', 'No explanation')}")
+                        print(f"  !! Auto-acknowledging for this session.")
+
             # Execute actions
             results = execute_actions(candidate, page)
-            response_parts = build_function_responses(page, results)
+            response_parts = build_function_responses(page, results, candidate)
             contents.append(
                 types.Content(role="user", parts=response_parts)
             )
@@ -268,5 +306,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Run browser in headless mode",
     )
+    parser.add_argument(
+        "--vertex",
+        action="store_true",
+        default=USE_VERTEX,
+        help="Use Vertex AI instead of AI Studio (function responses may not work yet)",
+    )
     args = parser.parse_args()
-    run(task=" ".join(args.task), start_url=args.url, headless=args.headless)
+    run(task=" ".join(args.task), start_url=args.url, headless=args.headless, use_vertex=args.vertex)
