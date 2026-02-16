@@ -1,3 +1,5 @@
 node_modules/
 *.json.bak
 *-sa-key.json
+*.key
+*-api-key.txt
