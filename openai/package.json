@@ -1,0 +1,10 @@
+{
+  "name": "openai-mcp-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "openai": "^6.22.0"
+  }
+}

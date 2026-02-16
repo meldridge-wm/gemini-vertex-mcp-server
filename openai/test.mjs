@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * End-to-end test for the Gemini MCP server (dual backend).
+ * End-to-end test for the OpenAI MCP server.
  * Spawns the server, sends MCP protocol messages, validates responses.
  */
 
@@ -79,16 +79,15 @@ async function run() {
     server.kill(); process.exit(1);
   }
 
-  console.log('\n=== Test 3: Gemini 3 Flash (Vertex AI) ===');
+  console.log('\n=== Test 3: o4-mini (fast) ===');
   send({
     jsonrpc: '2.0', id: 3, method: 'tools/call',
     params: {
-      name: 'gemini',
+      name: 'openai',
       arguments: {
-        prompt: 'Reply with exactly: GEMINI_MCP_TEST_OK',
-        model: 'gemini-3-flash-preview',
-        googleSearch: false,
-        thinkingLevel: 'NONE'
+        prompt: 'Reply with exactly: OPENAI_MCP_TEST_OK',
+        model: 'o4-mini',
+        reasoningEffort: 'low'
       }
     }
   });
@@ -97,57 +96,32 @@ async function run() {
     const r = await waitForResponse(3, 60000);
     const text = r.result?.content?.[0]?.text || '';
     console.log('✓ Got response:', text.slice(0, 200));
-    if (text.includes('Vertex AI')) console.log('✓ Routed to Vertex AI');
-    if (r.result?.isError) console.log('✗ isError=true');
+    if (text.includes('OPENAI_MCP_TEST_OK')) console.log('✓ Contains expected string');
+    if (r.result?.isError) console.log('✗ Tool returned isError=true');
   } catch (e) {
-    console.log('✗ Flash failed:', e.message);
+    console.log('✗ o4-mini failed:', e.message, '\nstderr:', stderr);
   }
 
-  console.log('\n=== Test 4: Gemini 3 Pro (Vertex AI + thinking + search) ===');
+  console.log('\n=== Test 4: o3-pro (deep reasoning) ===');
   send({
     jsonrpc: '2.0', id: 4, method: 'tools/call',
     params: {
-      name: 'gemini',
+      name: 'openai',
       arguments: {
         prompt: 'What is 2+2? Reply with just the number.',
-        model: 'gemini-3-pro-preview'
+        model: 'o3-pro'
       }
     }
   });
 
   try {
-    const r = await waitForResponse(4, 120000);
+    const r = await waitForResponse(4, 180000);
     const text = r.result?.content?.[0]?.text || '';
     console.log('✓ Got response:', text.slice(0, 300));
-    if (text.includes('Vertex AI')) console.log('✓ Routed to Vertex AI');
-    if (r.result?.isError) console.log('✗ isError=true');
-    else console.log('✓ Pro call succeeded');
+    if (r.result?.isError) console.log('✗ Tool returned isError=true');
+    else console.log('✓ o3-pro call succeeded');
   } catch (e) {
-    console.log('✗ Pro failed:', e.message);
-  }
-
-  console.log('\n=== Test 5: Robotics ER (AI Studio fallback) ===');
-  send({
-    jsonrpc: '2.0', id: 5, method: 'tools/call',
-    params: {
-      name: 'gemini',
-      arguments: {
-        prompt: 'What is 2+2? Reply with just the number.',
-        model: 'gemini-robotics-er-1.5-preview',
-        googleSearch: false
-      }
-    }
-  });
-
-  try {
-    const r = await waitForResponse(5, 60000);
-    const text = r.result?.content?.[0]?.text || '';
-    console.log('✓ Got response:', text.slice(0, 300));
-    if (text.includes('AI Studio')) console.log('✓ Routed to AI Studio');
-    if (r.result?.isError) console.log('✗ isError=true');
-    else console.log('✓ Robotics call succeeded');
-  } catch (e) {
-    console.log('✗ Robotics failed:', e.message);
+    console.log('✗ o3-pro failed:', e.message, '\nstderr:', stderr);
   }
 
   console.log('\n=== All tests complete ===');
