@@ -147,6 +147,42 @@ async function run() {
     console.log('stderr:', stderr);
   }
 
+  console.log('\n=== Test 5: Call Robotics ER (API key fallback) ===');
+  if (!process.env.GEMINI_API_KEY && !process.env.GEMINI_API_KEYS) {
+    console.log('⚠ Skipped — GEMINI_API_KEY not set');
+  } else {
+    send({
+      jsonrpc: '2.0', id: 5, method: 'tools/call',
+      params: {
+        name: 'gemini',
+        arguments: {
+          prompt: 'What is 3+3? Reply with just the number.',
+          model: 'gemini-robotics-er-1.5-preview',
+          thinkingLevel: 'NONE'
+        }
+      }
+    });
+
+    try {
+      const callResp = await waitForResponse(5, 60000);
+      const text = callResp.result?.content?.[0]?.text || '';
+      console.log('✓ Got response:', text.slice(0, 300));
+      if (text.includes('AI Studio')) {
+        console.log('✓ Correctly routed to AI Studio (API key)');
+      } else if (text.includes('Vertex AI')) {
+        console.log('⚠ Routed to Vertex AI (model may now be available there)');
+      }
+      if (callResp.result?.isError) {
+        console.log('✗ Tool returned isError=true');
+      } else {
+        console.log('✓ Robotics ER call succeeded');
+      }
+    } catch (e) {
+      console.log('✗ Robotics ER call failed:', e.message);
+      console.log('stderr:', stderr);
+    }
+  }
+
   console.log('\n=== All tests complete ===');
   server.kill();
   process.exit(0);
